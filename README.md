@@ -1,18 +1,74 @@
 # xiaozhi-vad-service
 
-Silero VAD standalone HTTP service for `xiaozhi-server`.
+Silero VAD standalone service with:
+
+- external protocol over `WebSocket`
+- internal inference fan-out over `multiprocessing` IPC
+- session-affinity routing for better concurrency behavior
+
+This keeps connection handling in the FastAPI process while moving decode and VAD inference work into dedicated worker processes.
 
 ## Endpoints
+
+### WebSocket
+
+- `GET /ws/v1/vad`
+
+Query parameters:
+
+- `session_id` (required)
+- `threshold`
+- `threshold_low`
+- `min_silence_duration_ms`
+- `frame_window_threshold`
+
+Protocol:
+
+1. The client streams binary frames.
+2. Each binary frame is one Opus packet, matching the original HTTP infer input mode.
+3. The server replies with the same VAD JSON fields returned by `POST /v1/vad/infer`.
+4. Optional text commands:
+   - `{"type":"ping"}`
+   - `{"type":"delete_session"}`
+
+The websocket path changes the transport only. The per-packet payload and inference response shape stay aligned with the original HTTP behavior.
+
+### HTTP compatibility
+
+The service still keeps:
 
 - `GET /health`
 - `POST /v1/vad/infer`
 - `DELETE /v1/vad/sessions/{session_id}`
 
-The service keeps per-session VAD state in memory, so run a single replica unless you add sticky routing or external state.
+`POST /v1/vad/infer` now uses the same IPC worker pool as the WebSocket path.
+
+## Concurrency model
+
+1. FastAPI accepts WebSocket and HTTP traffic.
+2. A stable hash of `session_id` pins the same session to the same worker.
+3. Each worker owns its model, decoder, and in-memory session state.
+4. The main process talks to workers through `multiprocessing.Queue`.
+
+This reduces pressure on a single Python process in high-concurrency scenarios.
+
+## Environment variables
+
+- `VAD_HOST`: default `0.0.0.0`
+- `VAD_PORT`: default `8766`
+- `VAD_MODEL_DIR`
+- `VAD_SESSION_TTL_SECONDS`: default `300`
+- `VAD_SESSION_CLEANUP_INTERVAL_SECONDS`: default `60`
+- `VAD_DEFAULT_THRESHOLD`: default `0.5`
+- `VAD_DEFAULT_THRESHOLD_LOW`: default `0.3`
+- `VAD_DEFAULT_MIN_SILENCE_DURATION_MS`: default `200`
+- `VAD_DEFAULT_FRAME_WINDOW_THRESHOLD`: default `3`
+- `VAD_API_KEY`: optional Bearer token
+- `VAD_WORKER_COUNT`: default `min(CPU count, 4)`
+- `VAD_WORKER_REQUEST_TIMEOUT_SECONDS`: default `10`
+- `VAD_TORCH_NUM_THREADS`: default `1`
 
 ## Start with Docker Compose
-
-From this directory:
 
 ```bash
 docker compose up --build -d
@@ -21,20 +77,7 @@ docker compose up --build -d
 Health check:
 
 ```bash
-curl http://192.168.99.103:8766/health
-```
-
-## Start with Docker
-
-```bash
-docker build -t xiaozhi-vad-service .
-docker run -d \
-  --name xiaozhi-vad-service \
-  -p 8766:8766 \
-  -e VAD_PORT=8766 \
-  -e VAD_MODEL_DIR=/app/models/snakers4_silero-vad \
-  -v ../xiaozhi-server/models/snakers4_silero-vad:/app/models/snakers4_silero-vad:ro \
-  xiaozhi-vad-service
+curl http://127.0.0.1:8766/health
 ```
 
 ## Start locally
@@ -43,35 +86,123 @@ PowerShell:
 
 ```powershell
 pip install -r requirements.txt
-$env:VAD_MODEL_DIR="..\xiaozhi-server\models\snakers4_silero-vad"
+$env:VAD_MODEL_DIR=".\snakers4_silero-vad"
+$env:VAD_WORKER_COUNT="2"
+$env:VAD_TORCH_NUM_THREADS="1"
 python app.py
 ```
 
-On Linux or macOS:
+Linux or macOS:
 
 ```bash
-export VAD_MODEL_DIR=../xiaozhi-server/models/snakers4_silero-vad
+pip install -r requirements.txt
+export VAD_MODEL_DIR=./snakers4_silero-vad
+export VAD_WORKER_COUNT=2
+export VAD_TORCH_NUM_THREADS=1
 python app.py
 ```
 
-## xiaozhi-server config
+## Go WebSocket tester
 
-Use the new VAD config block:
+A ready-to-run Go tester is included:
 
-```yaml
-selected_module:
-  VAD: SileroVADService
+- [tools/go-vad-ws-tester/main.go](/C:/Users/admin/Desktop/work/xiaozhi-vad-service/tools/go-vad-ws-tester/main.go)
 
-VAD:
-  SileroVADService:
-    type: remote_http
-    base_url: http://192.168.99.103:8766
-    timeout_ms: 1500
-    threshold: 0.5
-    threshold_low: 0.3
-    min_silence_duration_ms: 200
-    frame_window_threshold: 3
-    api_key: ""
+It connects to the new WebSocket endpoint and streams a local WAV file as `pcm_s16le`, so you can test the service without implementing Opus encoding first.
+
+It supports:
+
+- `single` mode for functional verification
+- `load` mode for concurrent websocket pressure testing
+- `ws` transport for the new websocket service
+- `http` transport for the old HTTP service or the compatibility endpoint
+
+### WAV requirements
+
+- 16kHz
+- mono
+- 16-bit PCM
+- `.wav`
+
+### Install Go if needed
+
+1. Open [go.dev/dl](https://go.dev/dl/)
+2. Install Go for your platform
+3. Re-open your shell
+4. Verify with:
+
+```powershell
+go version
 ```
 
-If you use `manager-api`, run its latest migration and then select `SileroVAD 服务版` in the role or agent model configuration page.
+### Run the tester
+
+```bash
+cd tools/go-vad-ws-tester
+go mod tidy
+go run . -wav D:\audio\test.wav
+```
+
+Common examples:
+
+```bash
+go run . -url ws://192.168.1.20:8766/ws/v1/vad -wav D:\audio\test.wav
+go run . -wav D:\audio\test.wav -api-key your_api_key
+go run . -wav D:\audio\test.wav -verbose
+go run . -wav D:\audio\test.wav -realtime=false
+```
+
+Legacy HTTP single-session example:
+
+```bash
+go run . -transport http -url http://127.0.0.1:8766 -wav D:\audio\test.wav
+```
+
+### Run a load test
+
+Example with 50 concurrent websocket sessions and 5 sessions per goroutine:
+
+```bash
+go run . -mode load -wav D:\audio\test.wav -concurrency 50 -iterations 5 -realtime=false
+```
+
+Example with time-based load for 60 seconds:
+
+```bash
+go run . -mode load -wav D:\audio\test.wav -concurrency 100 -duration 60s -realtime=false
+```
+
+Load mode prints:
+
+- progress snapshots while running
+- session success and failure counts
+- frame success and failure counts
+- session throughput
+- frame throughput
+- latency `avg`, `p50`, `p95`, `p99`, `max`
+
+Legacy HTTP load test example:
+
+```bash
+go run . -mode load -transport http -url http://127.0.0.1:8766 -wav D:\audio\test.wav -concurrency 50 -duration 60s -realtime=false
+```
+
+Notes:
+
+- `transport=ws` defaults to `audio-format=opus`
+- `transport=http` defaults to `audio-format=opus`
+- `transport=ws` is meant to preserve the original Opus packet mode from the HTTP service
+
+## Example WebSocket URLs
+
+PCM:
+
+```text
+ws://127.0.0.1:8766/ws/v1/vad?session_id=test-001&audio_format=pcm_s16le&threshold=0.5&threshold_low=0.3&min_silence_duration_ms=200&frame_window_threshold=3
+```
+
+Opus:
+
+```text
+ws://127.0.0.1:8766/ws/v1/vad?session_id=test-002&audio_format=opus
+```

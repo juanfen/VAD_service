@@ -3,7 +3,7 @@ FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/python:3.10
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     VAD_HOST=0.0.0.0 \
-    VAD_PORT=8766 \
+    VAD_PORT=8866 \
     VAD_MODEL_DIR=/app/models/snakers4_silero-vad
 
 WORKDIR /app
@@ -18,6 +18,6 @@ RUN pip install --upgrade pip setuptools wheel && \
 
 COPY app.py .
 
-EXPOSE 8766
+EXPOSE 8866
 
 CMD ["python", "app.py"]
