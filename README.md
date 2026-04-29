@@ -77,7 +77,7 @@ docker compose up --build -d
 Health check:
 
 ```bash
-curl http://127.0.0.1:8766/health
+curl http://127.0.0.1:8866/health
 ```
 
 ## Start locally
@@ -87,8 +87,6 @@ PowerShell:
 ```powershell
 pip install -r requirements.txt
 $env:VAD_MODEL_DIR=".\snakers4_silero-vad"
-$env:VAD_WORKER_COUNT="2"
-$env:VAD_TORCH_NUM_THREADS="1"
 python app.py
 ```
 
@@ -96,10 +94,7 @@ Linux or macOS:
 
 ```bash
 pip install -r requirements.txt
-export VAD_MODEL_DIR=./snakers4_silero-vad
-export VAD_WORKER_COUNT=2
-export VAD_TORCH_NUM_THREADS=1
-python app.py
+env VAD_MODEL_DIR=./snakers4_silero-vad python app.py
 ```
 
 ## Go WebSocket tester
@@ -108,7 +103,7 @@ A ready-to-run Go tester is included:
 
 - [tools/go-vad-ws-tester/main.go](/C:/Users/admin/Desktop/work/xiaozhi-vad-service/tools/go-vad-ws-tester/main.go)
 
-It connects to the new WebSocket endpoint and streams a local WAV file as `pcm_s16le`, so you can test the service without implementing Opus encoding first.
+It can drive both the legacy HTTP endpoint and the new WebSocket endpoint while preserving the original `Opus packet` payload mode.
 
 It supports:
 
@@ -146,7 +141,7 @@ go run . -wav D:\audio\test.wav
 Common examples:
 
 ```bash
-go run . -url ws://192.168.1.20:8766/ws/v1/vad -wav D:\audio\test.wav
+go run . -url ws://192.168.1.20:8866/ws/v1/vad -wav D:\audio\test.wav
 go run . -wav D:\audio\test.wav -api-key your_api_key
 go run . -wav D:\audio\test.wav -verbose
 go run . -wav D:\audio\test.wav -realtime=false
@@ -195,14 +190,8 @@ Notes:
 
 ## Example WebSocket URLs
 
-PCM:
-
-```text
-ws://127.0.0.1:8766/ws/v1/vad?session_id=test-001&audio_format=pcm_s16le&threshold=0.5&threshold_low=0.3&min_silence_duration_ms=200&frame_window_threshold=3
-```
-
 Opus:
 
 ```text
-ws://127.0.0.1:8766/ws/v1/vad?session_id=test-002&audio_format=opus
+ws://127.0.0.1:8866/ws/v1/vad?session_id=test-002&audio_format=opus
 ```

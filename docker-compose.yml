@@ -4,7 +4,7 @@ services:
       context: .
     container_name: xiaozhi-vad-service
     ports:
-      - "8766:8766"
+      - "8866:8866"
     environment:
       VAD_HOST: 0.0.0.0
       VAD_PORT: 8866
