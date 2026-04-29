@@ -51,11 +51,12 @@ The service still keeps:
 4. The main process talks to workers through `multiprocessing.Queue`.
 
 This reduces pressure on a single Python process in high-concurrency scenarios.
+To reduce queue churn under bursty websocket traffic, concurrent `infer` calls bound for the same worker are also micro-batched before crossing the IPC boundary.
 
 ## Environment variables
 
 - `VAD_HOST`: default `0.0.0.0`
-- `VAD_PORT`: default `8766`
+- `VAD_PORT`: default `8866`
 - `VAD_MODEL_DIR`
 - `VAD_SESSION_TTL_SECONDS`: default `300`
 - `VAD_SESSION_CLEANUP_INTERVAL_SECONDS`: default `60`
@@ -67,6 +68,8 @@ This reduces pressure on a single Python process in high-concurrency scenarios.
 - `VAD_WORKER_COUNT`: default `min(CPU count, 4)`
 - `VAD_WORKER_REQUEST_TIMEOUT_SECONDS`: default `10`
 - `VAD_TORCH_NUM_THREADS`: default `1`
+- `VAD_IPC_BATCH_MAX_SIZE`: default `16`
+- `VAD_IPC_BATCH_WAIT_MS`: default `1.5`
 
 ## Start with Docker Compose
 

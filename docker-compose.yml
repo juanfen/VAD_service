@@ -18,6 +18,8 @@ services:
       VAD_WORKER_COUNT: 2
       VAD_WORKER_REQUEST_TIMEOUT_SECONDS: 10
       VAD_TORCH_NUM_THREADS: 1
+      VAD_IPC_BATCH_MAX_SIZE: 16
+      VAD_IPC_BATCH_WAIT_MS: 1.5
       VAD_API_KEY: ""
     volumes:
       - ./snakers4_silero-vad:/app/models/snakers4_silero-vad:ro

@@ -41,6 +41,8 @@ WORKER_REQUEST_TIMEOUT_SECONDS = float(
     os.getenv("VAD_WORKER_REQUEST_TIMEOUT_SECONDS", "10")
 )
 TORCH_NUM_THREADS = max(int(os.getenv("VAD_TORCH_NUM_THREADS", "1")), 1)
+IPC_BATCH_MAX_SIZE = max(int(os.getenv("VAD_IPC_BATCH_MAX_SIZE", "16")), 1)
+IPC_BATCH_WAIT_MS = max(float(os.getenv("VAD_IPC_BATCH_WAIT_MS", "1.5")), 0.0)
 PCM_SAMPLE_RATE = 16000
 PCM_FRAME_SIZE = 512
 PCM_SAMPLE_WIDTH_BYTES = 2
@@ -188,7 +190,7 @@ def infer_audio_chunk(
         audio_float32 = audio_int16.astype(np.float32) / 32768.0
         audio_tensor = torch.from_numpy(audio_float32)
 
-        with torch.no_grad():
+        with torch.inference_mode():
             speech_prob = model(audio_tensor, PCM_SAMPLE_RATE).item()
 
         if speech_prob >= threshold:
@@ -221,6 +223,78 @@ def infer_audio_chunk(
     }
 
 
+def execute_worker_request(
+    session_store: Dict[str, SessionState],
+    request: Dict[str, Any],
+    worker_id: int,
+) -> Dict[str, Any]:
+    request_type = request.get("type")
+    if request_type == "infer":
+        session_id = request["session_id"]
+        audio_format = validate_audio_format(request["audio_format"])
+        session = get_or_create_worker_session(
+            session_store=session_store,
+            session_id=session_id,
+            audio_format=audio_format,
+        )
+        return infer_audio_chunk(
+            session=session,
+            audio_chunk=request["payload"],
+            threshold=request["threshold"],
+            threshold_low=request["threshold_low"],
+            min_silence_duration_ms=request["min_silence_duration_ms"],
+            frame_window_threshold=request["frame_window_threshold"],
+        )
+    if request_type == "delete_session":
+        deleted = session_store.pop(request["session_id"], None) is not None
+        return {"deleted": deleted, "session_id": request["session_id"]}
+    if request_type == "health":
+        expired = cleanup_expired_sessions(session_store)
+        return {
+            "worker_id": worker_id,
+            "session_count": len(session_store),
+            "expired_sessions": expired,
+        }
+    raise ValueError(f"unsupported worker request type: {request_type}")
+
+
+def build_worker_response(request_id: Optional[str], result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "request_id": request_id,
+        "ok": True,
+        "result": result,
+    }
+
+
+def build_worker_error_response(
+    request_id: Optional[str],
+    exc: Exception,
+) -> Dict[str, Any]:
+    return {
+        "request_id": request_id,
+        "ok": False,
+        "error": str(exc),
+        "error_type": exc.__class__.__name__,
+    }
+
+
+def dispatch_worker_request(
+    session_store: Dict[str, SessionState],
+    request: Dict[str, Any],
+    worker_id: int,
+) -> Dict[str, Any]:
+    request_id = request.get("request_id")
+    try:
+        result = execute_worker_request(
+            session_store=session_store,
+            request=request,
+            worker_id=worker_id,
+        )
+        return build_worker_response(request_id, result)
+    except Exception as exc:
+        return build_worker_error_response(request_id, exc)
+
+
 def worker_main(
     worker_id: int,
     request_queue: mp.Queue,
@@ -247,52 +321,25 @@ def worker_main(
         if request_type == "shutdown":
             break
 
-        try:
-            if request_type == "infer":
-                session_id = request["session_id"]
-                audio_format = validate_audio_format(request["audio_format"])
-                session = get_or_create_worker_session(
+        if request_type == "infer_batch":
+            responses = [
+                dispatch_worker_request(
                     session_store=session_store,
-                    session_id=session_id,
-                    audio_format=audio_format,
+                    request=batch_request,
+                    worker_id=worker_id,
                 )
-                result = infer_audio_chunk(
-                    session=session,
-                    audio_chunk=request["payload"],
-                    threshold=request["threshold"],
-                    threshold_low=request["threshold_low"],
-                    min_silence_duration_ms=request["min_silence_duration_ms"],
-                    frame_window_threshold=request["frame_window_threshold"],
-                )
-            elif request_type == "delete_session":
-                deleted = session_store.pop(request["session_id"], None) is not None
-                result = {"deleted": deleted, "session_id": request["session_id"]}
-            elif request_type == "health":
-                expired = cleanup_expired_sessions(session_store)
-                result = {
-                    "worker_id": worker_id,
-                    "session_count": len(session_store),
-                    "expired_sessions": expired,
-                }
-            else:
-                raise ValueError(f"unsupported worker request type: {request_type}")
+                for batch_request in request.get("requests", [])
+            ]
+            response_queue.put({"type": "batch", "responses": responses})
+            continue
 
-            response_queue.put(
-                {
-                    "request_id": request_id,
-                    "ok": True,
-                    "result": result,
-                }
+        response_queue.put(
+            dispatch_worker_request(
+                session_store=session_store,
+                request=request,
+                worker_id=worker_id,
             )
-        except Exception as exc:
-            response_queue.put(
-                {
-                    "request_id": request_id,
-                    "ok": False,
-                    "error": str(exc),
-                    "error_type": exc.__class__.__name__,
-                }
-            )
+        )
 
 
 class IPCWorkerClient:
@@ -311,16 +358,101 @@ class IPCWorkerClient:
         self.pending_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.router_thread: Optional[threading.Thread] = None
+        self.sender_thread: Optional[threading.Thread] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.outbound_queue: queue.Queue = queue.Queue()
+        self.deferred_queue: deque[Dict[str, Any]] = deque()
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
+        self.sender_thread = threading.Thread(
+            target=self._send_requests,
+            name=f"vad-worker-sender-{self.worker_id}",
+            daemon=True,
+        )
         self.router_thread = threading.Thread(
             target=self._route_responses,
             name=f"vad-worker-router-{self.worker_id}",
             daemon=True,
         )
+        self.sender_thread.start()
         self.router_thread.start()
+
+    def _next_outbound_request(self, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
+        if self.deferred_queue:
+            return self.deferred_queue.popleft()
+
+        try:
+            request = self.outbound_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+        if request is None:
+            self.stop_event.set()
+            return None
+        return request
+
+    def _send_requests(self) -> None:
+        batch_wait_seconds = IPC_BATCH_WAIT_MS / 1000.0
+        while not self.stop_event.is_set():
+            request = self._next_outbound_request()
+            if request is None:
+                continue
+
+            if request.get("type") != "infer" or IPC_BATCH_MAX_SIZE <= 1:
+                self.request_queue.put(request)
+                continue
+
+            batch = [request]
+            deadline = time.perf_counter() + batch_wait_seconds
+
+            while len(batch) < IPC_BATCH_MAX_SIZE:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    break
+
+                next_request = self._next_outbound_request(timeout=remaining)
+                if next_request is None:
+                    break
+
+                if next_request.get("type") != "infer":
+                    self.deferred_queue.appendleft(next_request)
+                    break
+
+                batch.append(next_request)
+
+            if len(batch) == 1:
+                self.request_queue.put(batch[0])
+                continue
+
+            self.request_queue.put({"type": "infer_batch", "requests": batch})
+
+    def _deliver_response(self, response: Dict[str, Any]) -> None:
+        request_id = response.get("request_id")
+        if not request_id or self.loop is None:
+            return
+
+        with self.pending_lock:
+            future = self.pending.pop(request_id, None)
+
+        if future is None:
+            return
+
+        def deliver() -> None:
+            if future.cancelled() or future.done():
+                return
+            if response.get("ok"):
+                future.set_result(response.get("result"))
+                return
+
+            future.set_exception(
+                WorkerRequestError(
+                    response.get("error", "worker request failed"),
+                    response.get("error_type", "WorkerError"),
+                )
+            )
+
+        self.loop.call_soon_threadsafe(deliver)
 
     def _route_responses(self) -> None:
         while not self.stop_event.is_set():
@@ -331,31 +463,12 @@ class IPCWorkerClient:
             except (EOFError, OSError):
                 break
 
-            request_id = response.get("request_id")
-            if not request_id or self.loop is None:
+            if response.get("type") == "batch":
+                for item in response.get("responses", []):
+                    self._deliver_response(item)
                 continue
 
-            with self.pending_lock:
-                future = self.pending.pop(request_id, None)
-
-            if future is None:
-                continue
-
-            def deliver() -> None:
-                if future.cancelled() or future.done():
-                    return
-                if response.get("ok"):
-                    future.set_result(response.get("result"))
-                    return
-
-                future.set_exception(
-                    WorkerRequestError(
-                        response.get("error", "worker request failed"),
-                        response.get("error_type", "WorkerError"),
-                    )
-                )
-
-            self.loop.call_soon_threadsafe(deliver)
+            self._deliver_response(response)
 
     async def submit(self, payload: Dict[str, Any], timeout: float) -> Dict[str, Any]:
         if self.loop is None:
@@ -369,7 +482,7 @@ class IPCWorkerClient:
 
         payload = dict(payload)
         payload["request_id"] = request_id
-        self.request_queue.put(payload)
+        self.outbound_queue.put(payload)
 
         try:
             return await asyncio.wait_for(future, timeout=timeout)
@@ -405,6 +518,9 @@ class IPCWorkerClient:
 
         if self.router_thread is not None:
             self.router_thread.join(timeout=2)
+        if self.sender_thread is not None:
+            self.outbound_queue.put(None)
+            self.sender_thread.join(timeout=2)
 
         self.process.join(timeout=5)
         if self.process.is_alive():
@@ -505,6 +621,8 @@ class VADBackend:
             "model_dir": MODEL_DIR,
             "worker_count": len(self.workers),
             "torch_num_threads": TORCH_NUM_THREADS,
+            "ipc_batch_max_size": IPC_BATCH_MAX_SIZE,
+            "ipc_batch_wait_ms": IPC_BATCH_WAIT_MS,
             "total_sessions": total_sessions,
             "workers": worker_reports,
         }
