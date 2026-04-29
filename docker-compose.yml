@@ -1,0 +1,20 @@
+services:
+  xiaozhi-vad-service:
+    build:
+      context: .
+    container_name: xiaozhi-vad-service
+    ports:
+      - "8766:8766"
+    environment:
+      VAD_HOST: 0.0.0.0
+      VAD_PORT: 8766
+      VAD_MODEL_DIR: /app/models/snakers4_silero-vad
+      VAD_SESSION_TTL_SECONDS: 300
+      VAD_SESSION_CLEANUP_INTERVAL_SECONDS: 60
+      VAD_DEFAULT_THRESHOLD: 0.5
+      VAD_DEFAULT_THRESHOLD_LOW: 0.3
+      VAD_DEFAULT_MIN_SILENCE_DURATION_MS: 200
+      VAD_DEFAULT_FRAME_WINDOW_THRESHOLD: 3
+      VAD_API_KEY: ""
+    volumes:
+      - ./snakers4_silero-vad:/app/models/snakers4_silero-vad:ro

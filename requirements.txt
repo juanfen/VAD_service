@@ -1,0 +1,6 @@
+fastapi==0.115.11
+numpy==1.26.4
+opuslib_next==1.1.5
+torch==2.2.2
+torchaudio==2.2.2
+uvicorn[standard]==0.34.0
