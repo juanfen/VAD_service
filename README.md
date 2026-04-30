@@ -185,6 +185,45 @@ Legacy HTTP load test example:
 go run . -mode load -transport http -url http://127.0.0.1:8766 -wav D:\audio\test.wav -concurrency 50 -duration 60s -realtime=false
 ```
 
+### Find the maximum stable concurrency
+
+For Linux load testing, the repository also includes:
+
+- [tools/go-vad-ws-tester/find-max-concurrency.sh](/C:/Users/admin/Desktop/work/xiaozhi-vad-service/tools/go-vad-ws-tester/find-max-concurrency.sh)
+
+It ramps concurrency upward and then uses binary search to find the highest concurrency that still satisfies the failure thresholds.
+
+Example:
+
+```bash
+cd tools/go-vad-ws-tester
+chmod +x find-max-concurrency.sh
+
+./find-max-concurrency.sh \
+  --wav /path/to/test.wav \
+  --transport ws \
+  --url ws://127.0.0.1:8866/ws/v1/vad \
+  --realtime true \
+  --duration 60s \
+  --start 50 \
+  --max 1000 \
+  --out max-concurrency-report.md
+```
+
+By default, a run is considered stable only when:
+
+- failed sessions = `0`
+- failed frames = `0`
+
+You can relax that if needed:
+
+```bash
+./find-max-concurrency.sh \
+  --wav /path/to/test.wav \
+  --allow-session-failures 1 \
+  --allow-frame-failures 10
+```
+
 Notes:
 
 - `transport=ws` defaults to `audio-format=opus`
