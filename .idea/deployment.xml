@@ -5,13 +5,6 @@
       <paths name="1">
         <serverdata>
           <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="WuHao@linux.kemande.cn:22">
-        <serverdata>
-          <mappings>
             <mapping deploy="/work/xiaozhi-vad-service" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>

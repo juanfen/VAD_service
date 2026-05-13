@@ -3,7 +3,7 @@
   <component name="WebServers">
     <option name="servers">
       <webServer id="9c9df22e-7ae4-4504-952e-de07ec3c5954" name="1">
-        <fileTransfer accessType="SFTP" host="linux.kemande.cn" port="22" sshConfigId="d4ebf879-11fc-46c8-b213-0480439adff1" sshConfig="WuHao@linux.kemande.cn:22">
+        <fileTransfer rootFolder="/home/wuhao@kemande.cn" accessType="SFTP" host="linux.kemande.cn" port="22" sshConfigId="d4ebf879-11fc-46c8-b213-0480439adff1" sshConfig="WuHao@linux.kemande.cn:22">
           <advancedOptions>
             <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
           </advancedOptions>
